@@ -1,71 +1,100 @@
+from colorama import Fore, Style, init
 import threading
 import socket
-import logging
+import time
+import random
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-PORT = 5050
-SERVER = "localhost"
+PORT = 60000
+HEADER = 2048
+SERVER = socket.gethostbyname(socket.gethostname())
 ADDR = (SERVER, PORT)
 FORMAT = "utf-8"
-DISCONNECT_MESSAGE = "!DISCONNECT"
+DISCONNECT_MESSAGE = "!Disconnect"
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.bind(ADDR)
 
-clients = {}
+clients = set()
 clients_lock = threading.Lock()
+user_colors = {}  # Dictionary to store username-color mapping
 
-def broadcast(message, sender_conn):
-    """Broadcast a message to all clients except the sender."""
+# Define a list of colors to choose from
+color_options = [
+    Fore.RED,
+    Fore.GREEN,
+    Fore.YELLOW,
+    Fore.BLUE,
+    Fore.MAGENTA,
+    Fore.CYAN,
+    Fore.WHITE
+]
+
+def get_user_color(username):
+    """Assign a color to each user based on their username."""
+    if username not in user_colors:
+        # Randomly assign a color if the user doesn't have one
+        user_colors[username] = random.choice(color_options)
+    return user_colors[username]
+
+def broadcast(message, sender=None):
+    """Broadcasts a message to all clients except the sender."""
     with clients_lock:
-        for conn in clients.keys():
-            if conn != sender_conn:
+        for client in clients.copy():  # Safely iterate over the set
+            if client != sender:
                 try:
-                    conn.sendall(message.encode(FORMAT))
+                    client.send(message)
                 except Exception as e:
-                    logging.error(f"Error sending message to client: {e}")
+                    print(f"[ERROR] Unable to send message: {e}")
+                    clients.remove(client)
 
 def handle_client(conn, addr):
-    logging.info(f"[NEW CONNECTION] {addr} Connected")
-    
-    # Get username from the client
-    username = conn.recv(1024).decode(FORMAT)
-    with clients_lock:
-        clients[conn] = username  # Store connection and username
-        broadcast(f"{username} has joined the chat!", conn)  # Broadcast join message
+    """Handles an individual client connection."""
+    print(f"[NEW CONNECTION] {addr} connected.")
 
     try:
-        while True:
-            msg = conn.recv(1024).decode(FORMAT)
-            if not msg:
-                break
-            logging.info(f"[{username}] {msg}")
-            broadcast(f"{username}: {msg}", conn)
+        username = conn.recv(HEADER).decode(FORMAT)
+        user_color = get_user_color(username)
+        print(f"[NEW USER] {username} connected.")
+        broadcast(f"{user_color}{username} has joined the chat.{Style.NORMAL}".encode(FORMAT), conn)
 
-    except Exception as e:
-        logging.error(f"Error handling client {addr}: {e}")
+        while True:
+            msg = conn.recv(HEADER).decode(FORMAT)
+            if not msg or msg == DISCONNECT_MESSAGE:
+                break
+
+            timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+            # Send messages with the user's color
+            broadcast(f"{user_color}{username}: {msg}{Style.NORMAL}".encode(FORMAT), conn)
+            print(f"\r[{timestamp}] {msg}{Style.NORMAL}")
+
     finally:
         with clients_lock:
-            del clients[conn]
-            broadcast(f"{username} has left the chat.", conn)
-            logging.info(f"[DISCONNECTED] {addr} Disconnected")
-        
+            clients.remove(conn)
+        broadcast(f"{Fore.RED}{username} has left the chat.{Style.NORMAL}".encode(FORMAT))
         conn.close()
+        print(f"[DISCONNECTED] {username} disconnected.")
+
+def server_broadcast_input():
+    """Allows the server to send messages to all clients."""
+    while True:
+        msg = input("Server: ").strip()
+        if msg:
+            broadcast(f"{Fore.YELLOW}[SERVER]: {msg}{Style.NORMAL}".encode(FORMAT))
 
 def start():
-    logging.info('[SERVER STARTED]!')
+    """Starts the server and listens for incoming connections."""
+    init()
+    print(f"[LISTENING] Server is listening on {SERVER}")
     server.listen()
+
+    threading.Thread(target=server_broadcast_input, daemon=True).start()
+
     while True:
         conn, addr = server.accept()
-        thread = threading.Thread(target=handle_client, args=(conn, addr))
-        thread.start()
+        with clients_lock:
+            clients.add(conn)
+        threading.Thread(target=handle_client, args=(conn, addr)).start()
+        print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 1}")
 
-if __name__ == "__main__":
-    try:
-        start()
-    except KeyboardInterrupt:
-        logging.info("\n[SERVER SHUTTING DOWN]!")
-    finally:
-        server.close()
+print("[STARTING] Server started...")
+start()
